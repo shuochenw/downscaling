@@ -1,152 +1,214 @@
 import torch
 from torch import nn
-import math
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
-import torch.nn.functional as F
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.tensorboard import SummaryWriter
 from itertools import cycle
 
-# setting device on GPU if available, else CPU
+# ======================
+# Device setup
+# ======================
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
-#Additional Info when using cuda
 if device.type == 'cuda':
     print(torch.cuda.get_device_name(0))
     print('Memory Usage:')
     print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
     print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
 
-writer = SummaryWriter(log_dir=f"runs/coral")
-
-# In[2]:
-
-
-# tas
+# ======================
+# Config
+# ======================
+exp_name = 'runs/dann_grl_test'
 var = 'tas'
 BATCH_SIZE = 32
-EPOCHS = 200
+EPOCHS = 400
 LEARNING_RATE = 1e-4
 SCALING_FACTOR = 4
 INPUT_CHANNELS = 1
 OUTPUT_CHANNELS = 1
 NUM_FEATURES = 64
-
 seed = 0
+
 torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(seed)
 
-# In[3]:
-
-
-# read tensor
+# ======================
+# Load Data
+# ======================
 X = torch.load('/projects/sds-lab/Shuochen/downscaling/canesm2/gcm_2deg_conus.pth')
 y = torch.load('/projects/sds-lab/Shuochen/downscaling/cordex_canesm2/rcm_0.5deg_conus.pth')
 
 # 1951-2005 historical 55 years; 2006-2100 rcp85
 X_train = X[:365*55,:,:,:]
-X_test = X[365*55:,:,:,:]
+X_test  = X[365*55:,:,:,:]
 y_train = y[:365*55,:,:,:]
-y_test = y[365*55:,:,:,:]
+y_test  = y[365*55:,:,:,:]
 print(X_train.shape, y_train.shape, X_test.shape, y_test.shape)
 
-# create datasets
+# Datasets and loaders
 training_set = TensorDataset(X_train, y_train)
-testing_set = TensorDataset(X_test, y_test)
-# create dataloaders
-train_dl = DataLoader(training_set, # dataset to turn into iterable
-    batch_size=BATCH_SIZE, # how many samples per batch? 
-    shuffle=True # shuffle data every epoch?
-)
-test_dl = DataLoader(testing_set,
-    batch_size=BATCH_SIZE,
-    shuffle=True # don't necessarily have to shuffle the testing data
-)
+testing_set  = TensorDataset(X_test, y_test)
+train_dataloader = DataLoader(training_set, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+test_dataloader  = DataLoader(testing_set,  batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
-from models import Encoder, Decoder
-encoder = Encoder().to(device)
-decoder = Decoder().to(device)
-opt_enc = torch.optim.AdamW(encoder.parameters(), lr=LEARNING_RATE)
-opt_dec = torch.optim.AdamW(decoder.parameters(), lr=LEARNING_RATE)
-sch_enc = CosineAnnealingLR(opt_enc, T_max=EPOCHS)
-sch_dec = CosineAnnealingLR(opt_dec, T_max=EPOCHS)
-loss_fn = nn.MSELoss()
+# ======================
+# Models
+# ======================
+from models import Encoder, Decoder, VGGDomainClassifier
 
-def coral_loss(source, target):
-    source = source.view(source.size(0), -1)
-    target = target.view(target.size(0), -1)
+model_Enc       = Encoder().to(device)
+model_Dec_SR    = Decoder().to(device)
+model_Disc_feat = VGGDomainClassifier().to(device)
 
-    source = source - source.mean(dim=0)
-    target = target - target.mean(dim=0)
+# ======================
+# Gradient Reversal Layer
+# ======================
+from torch.autograd import Function
 
-    source_cov = (source.T @ source) / (source.size(0) - 1)
-    target_cov = (target.T @ target) / (target.size(0) - 1)
+class GradientReversalFunction(Function):
+    @staticmethod
+    def forward(ctx, x, λ):
+        ctx.λ = λ
+        return x.view_as(x)
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.λ * grad_output, None
 
-    loss = torch.mean((source_cov - target_cov) ** 2)
-    return loss
+class GradientReversalLayer(nn.Module):
+    def __init__(self, λ=1.0):
+        super().__init__()
+        self.λ = λ
+    def forward(self, x):
+        return GradientReversalFunction.apply(x, self.λ)
 
-for epoch in range(1, EPOCHS + 1):
-    encoder.train()
-    decoder.train()
+grl = GradientReversalLayer(λ=1.0)
 
-    running_sr = 0.0
-    running_coral = 0.0
+# ======================
+# Optimizers & schedulers
+# ======================
+optimizer_Enc       = torch.optim.AdamW(model_Enc.parameters(),       lr=LEARNING_RATE, weight_decay=1e-4)
+optimizer_Dec_SR    = torch.optim.AdamW(model_Dec_SR.parameters(),    lr=LEARNING_RATE, weight_decay=1e-4)
+optimizer_Disc_feat = torch.optim.AdamW(model_Disc_feat.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
-    for (x_src, y_src), (x_tgt, _) in zip(cycle(train_dl), test_dl):
-        x_src, y_src = x_src.to(device), y_src.to(device)
-        x_tgt = x_tgt.to(device)
+scheduler_Enc       = CosineAnnealingLR(optimizer_Enc,       T_max=EPOCHS)
+scheduler_Dec_SR    = CosineAnnealingLR(optimizer_Dec_SR,    T_max=EPOCHS)
+scheduler_Disc_feat = CosineAnnealingLR(optimizer_Disc_feat, T_max=EPOCHS)
 
-        # Forward
-        f_src = encoder(x_src)
-        f_tgt = encoder(x_tgt)
-        y_pred = decoder(f_src)
+# ======================
+# Loss functions
+# ======================
+loss_MSE = nn.MSELoss()
+loss_BCE_logits = nn.BCEWithLogitsLoss()
 
-        # Losses
-        loss_sr = loss_fn(y_pred, y_src)
-        loss_coral = coral_loss(f_src, f_tgt)
-        lambda_coral = epoch / EPOCHS
-        loss = loss_sr + lambda_coral * loss_coral
+# ======================
+# TensorBoard
+# ======================
+writer = SummaryWriter(log_dir=exp_name)
 
-        # Backward
-        opt_enc.zero_grad()
-        opt_dec.zero_grad()
-        loss.backward()
-        opt_enc.step()
-        opt_dec.step()
+# ======================
+# Training
+# ======================
+L_rec_G_SR_list = []
+loss_Disc_feat_align_list = []
+test_loss_list = []
 
-        running_sr += loss_sr.item()
-        running_coral += loss_coral.item()
+for epoch in range(EPOCHS):
+    model_Enc.train()
+    model_Dec_SR.train()
+    model_Disc_feat.train()
 
-    # === Validation ===
-    encoder.eval()
-    decoder.eval()
-    test_loss = 0.0
+    L_rec_G_SR_sum, loss_Disc_feat_align_sum = 0.0, 0.0
 
+    for (xs, ys), (xt, _) in zip(train_dataloader, cycle(test_dataloader)):
+        xs, ys, xt = xs.to(device), ys.to(device), xt.to(device)
+        bs = xs.shape[0]
+
+        # ========= Forward =========
+        F_s = model_Enc(xs)   # source features
+        F_t = model_Enc(xt)   # target features
+
+        # SR reconstruction
+        y_pred = model_Dec_SR(F_s)
+        L_rec_G_SR = loss_MSE(y_pred, ys)
+
+        # Domain classification with GRL
+        F_s_rev = grl(F_s)
+        F_t_rev = grl(F_t)
+        out_s = model_Disc_feat(F_s_rev).view(-1, 1)
+        out_t = model_Disc_feat(F_t_rev).view(-1, 1)
+
+        real_label = torch.ones(bs, 1, device=device)
+        fake_label = torch.zeros(bs, 1, device=device)
+
+        loss_D_s = loss_BCE_logits(out_s, real_label)
+        loss_D_t = loss_BCE_logits(out_t, fake_label)
+        loss_D = 0.5 * (loss_D_s + loss_D_t)
+
+        # ========= Total Loss =========
+        loss_total = L_rec_G_SR + 0.01 * loss_D
+
+        optimizer_Enc.zero_grad()
+        optimizer_Dec_SR.zero_grad()
+        optimizer_Disc_feat.zero_grad()
+        loss_total.backward()
+        optimizer_Enc.step()
+        optimizer_Dec_SR.step()
+        optimizer_Disc_feat.step()
+
+        L_rec_G_SR_sum += L_rec_G_SR.item()
+        loss_Disc_feat_align_sum += loss_D.item()
+
+    # Average losses
+    L_rec_G_SR_sum /= len(train_dataloader)
+    loss_Disc_feat_align_sum /= len(train_dataloader)
+    L_rec_G_SR_list.append(L_rec_G_SR_sum)
+    loss_Disc_feat_align_list.append(loss_Disc_feat_align_sum)
+
+    # ======================
+    # Test evaluation
+    # ======================
     with torch.no_grad():
-        for x, y_hr in test_dl:
-            x = x.to(device)
-            y_hr = y_hr.to(device)
+        model_Enc.eval()
+        model_Dec_SR.eval()
+        model_Disc_feat.eval()
 
-            feat = encoder(x)
-            y_pred = decoder(feat)
-            loss = loss_fn(y_pred, y_hr)
-            test_loss += loss.item()
+        test_loss = 0.0
+        for Xb, yb in test_dataloader:
+            Xb, yb = Xb.to(device), yb.to(device)
+            y_enc = model_Enc(Xb)
+            test_pred = model_Dec_SR(y_enc)
+            test_loss += loss_MSE(test_pred, yb).item()
+        test_loss /= len(test_dataloader)
+        test_loss_list.append(test_loss)
 
-    # Scheduler step
-    sch_enc.step()
-    sch_dec.step()
+    # LR schedulers
+    scheduler_Enc.step()
+    scheduler_Dec_SR.step()
+    scheduler_Disc_feat.step()
 
-    print(f"Epoch {epoch:03d} | SR Loss: {running_sr/len(train_dl):.6f} | "
-          f"CORAL Loss: {running_coral/len(train_dl):.6f} | "
-          f"Test Loss: {test_loss/len(test_dl):.6f}")
-    # === Logging ===
-    avg_sr = running_sr / len(train_dl)
-    avg_coral = running_coral / len(train_dl)
-    avg_test = test_loss / len(test_dl)
+    # Log to TensorBoard
+    writer.add_scalar('Loss/L_rec_G_SR', L_rec_G_SR_sum, epoch)
+    writer.add_scalar('Loss/loss_Disc_feat_align', loss_Disc_feat_align_sum, epoch)
+    writer.add_scalar('Loss/Test', test_loss, epoch)
 
-    writer.add_scalar('Loss/SR', avg_sr, epoch)
-    writer.add_scalar('Loss/CORAL', avg_coral, epoch)
-    writer.add_scalar('Loss/Test', avg_test, epoch)
-    writer.add_scalar('Lambda/CORAL', lambda_coral, epoch)
+    print(f"Epoch {epoch:03d} | SR Loss: {L_rec_G_SR_sum:.5f} | "
+          f"Domain Loss: {loss_Disc_feat_align_sum:.5f} | Test Loss: {test_loss:.5f}")
+
+# ======================
+# Final test prediction
+# ======================
+preds, y_true = [], []
+with torch.no_grad():
+    for Xb, yb in test_dataloader:
+        Xb, yb = Xb.to(device), yb.to(device)
+        y_enc = model_Enc(Xb)
+        y_pred = model_Dec_SR(y_enc)
+        preds.append(y_pred.cpu())
+        y_true.append(yb.cpu())
+test_pred = torch.cat(preds, dim=0)
+y_true = torch.cat(y_true, dim=0)
+final_loss = loss_MSE(test_pred, y_true)
+print("Final Test MSE:", final_loss.item())

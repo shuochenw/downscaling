@@ -1,4 +1,4 @@
-exp_name = 'runs/baseline tuning 1 NAdam cosineannealing scheduler shuffle test random weidec 1e-4 400 bs 128'
+exp_name = 'runs/baseline AdamW cosineannealing shuffle test random weidec 1e-4 400'
 
 # # split UNet to an encoder and a decoder
 
@@ -30,7 +30,7 @@ if device.type == 'cuda':
 
 # tas
 var = 'tas'
-BATCH_SIZE = 128
+BATCH_SIZE = 32
 EPOCHS = 400
 LEARNING_RATE = 1e-4
 SCALING_FACTOR = 4
@@ -88,8 +88,8 @@ model_dec = Decoder().to(device)
 # model_dec.apply(initialize_weights)
 
 loss_fn = nn.MSELoss()
-optimizer_enc = torch.optim.NAdam(model_enc.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
-optimizer_dec = torch.optim.NAdam(model_dec.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+optimizer_enc = torch.optim.AdamW(model_enc.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+optimizer_dec = torch.optim.AdamW(model_dec.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 # scheduler = ReduceLROnPlateau(optimizer, patience=50, factor=0.5)
 scheduler_enc = CosineAnnealingLR(optimizer_enc, T_max=EPOCHS)
 scheduler_dec = CosineAnnealingLR(optimizer_dec, T_max=EPOCHS)
