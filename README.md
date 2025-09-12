@@ -1,3 +1,10 @@
 GCM data (X): [link](https://drive.google.com/file/d/1_jMFuwbjgoguAhAazGXZw-xx8xD-RTui/view?usp=sharing)
 
 RCM data (y): [link](https://drive.google.com/file/d/1SyDSELntvWPmGGevXihpcjcuzDQXSNCU/view?usp=sharing)
+
+UNet architecture in: Fig.2, "Regional climate model emulator based on deep learning: concept and first evaluation of a novel hybrid downscaling approach"
+Red block as encoder, the rest as decoder
+
+1. baseline.py
+2. dann.py
+3. full.py, from [link](https://github.com/anse3832/USR_DA/tree/main), paper: [link](https://openaccess.thecvf.com/content/ICCV2021/html/Wang_Unsupervised_Real-World_Super-Resolution_A_Domain_Adaptation_Perspective_ICCV_2021_paper.html)
