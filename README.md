@@ -11,5 +11,8 @@ Red block as encoder, the rest as decoder
 
 models_all.py has other models that were not used in the above three files.  
 Results are saved in *_results.log  
-The "runs" folder is for tracking losses in Tensorboard  
+The "runs" folder is for tracking losses in Tensorboard.
+
+Inside the repo, run ./submit.sh
+In gpu.sh, change the name of the experiment: baseline.py, dann.py, full.py
 
