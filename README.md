@@ -13,8 +13,9 @@ models_all.py has other models that were not used in the above three files.
 Results are saved in *_results.log  
 The "runs" folder is for tracking losses in Tensorboard.
 
-1. Inside the repo, mark submit.sh to executable: **chmod +x submit.sh**  
-2. In gpu.sh, **change the name of the experiment (baseline.py, dann.py, full.py)** before submission.  
-3. Inside the repo, run **./submit.sh** to submit jobs. Once the job is submitted, the entire repo will be saved immediately to "/scratch/wang.shuoc/". Therefore, all changes in the repo are fixed at the time of submission. In this case, running a second experiment will not overwrite the first one when the first one is still in the queue (files are not read into HPC when it is still in the queue). 
+1. Inside the repo, mark submit.sh to executable: **chmod +x submit.sh**
+2. Change the experiment file (baseline.py, dann.py, full.py): name the experiment using **exp_name = 'runs/exp_1'**
+3. Before submission, in gpu.sh, **change the name of the experiment (baseline.py, dann.py, full.py)**.  
+4. Inside the repo, run **./submit.sh** to submit jobs. Once the job is submitted, the entire repo will be saved immediately to "/scratch/wang.shuoc/". Therefore, all changes in the repo are fixed at the time of submission. In this case, running a second experiment will not overwrite the first one when the first one is still in the queue (files are not read into HPC when it is still in the queue). 
 
 
